@@ -1,0 +1,15 @@
+    app-runner:
+        container_name: app-runner
+        restart: unless-stopped
+        image: phil73/pj-images-utils-app-runner:latest
+        ports:
+            - 2001:2001
+        volumes:
+            - ./games_deployments:/data
+            # We explicitly do NOT mount node_modules to avoid host OS conflicts
+        environment:
+            - PORT=2001
+            - DATA_DIR=/data
+        networks:
+            pj-images-vlan-200:
+                ipv4_address: 192.168.200.8 # Next available IP based on your list
