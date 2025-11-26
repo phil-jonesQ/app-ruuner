@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Terminal, Play, Loader2, RefreshCw, AlertTriangle, Hammer, ExternalLink } from 'lucide-react';
 import { Project } from './types';
 
