@@ -57,7 +57,7 @@ const App = () => {
             </div>
             <div>
               <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
-                Gemini App Runner
+                PJ App Runner
               </h1>
               <p className="text-gray-400 mt-1">Deploying locally from <span className="font-mono bg-gray-900 px-2 py-0.5 rounded text-sm">/data</span></p>
             </div>
