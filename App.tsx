@@ -11,7 +11,7 @@ const App = () => {
   const fetchProjects = async () => {
     try {
       setLoading(true);
-      const res = await fetch('/api/projects');
+      const res = await fetch('api/projects');
       if (!res.ok) throw new Error('Failed to fetch projects');
       const data = await res.json();
       setProjects(data);
@@ -29,7 +29,7 @@ const App = () => {
   const handleBuild = async (id: string) => {
     setBuildingId(id);
     try {
-      const res = await fetch(`/api/build/${id}`, { method: 'POST' });
+      const res = await fetch(`api/build/${id}`, { method: 'POST' });
       const data = await res.json();
       
       if (!res.ok) {
@@ -120,55 +120,55 @@ const App = () => {
                         {/* Card Actions */}
                         <div className="p-4 bg-gray-950/50 border-t border-gray-800 flex items-center justify-between gap-3">
                             {project.hasDist ? (
-                                <a 
-                                    href={project.path} 
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="flex-1 flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg font-medium transition-colors"
-                                >
-                                    <Play className="w-4 h-4 fill-current" />
-                                    <span>Launch</span>
-                                </a>
+                              <a
+                                href={project.path?.startsWith('/') ? project.path.slice(1) : project.path}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex-1 flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg font-medium transition-colors"
+                              >
+                                <Play className="w-4 h-4 fill-current" />
+                                <span>Launch</span>
+                              </a>
                             ) : (
-                                <button
-                                    onClick={() => handleBuild(project.id)}
-                                    disabled={buildingId === project.id || !project.hasPackageJson}
-                                    className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg font-medium transition-colors border
-                                        ${buildingId === project.id 
-                                            ? 'bg-gray-800 border-gray-700 text-gray-400 cursor-not-allowed' 
-                                            : !project.hasPackageJson
-                                                ? 'bg-red-900/10 border-red-900/30 text-red-400 cursor-not-allowed'
-                                                : 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-200'
-                                        }`}
-                                >
-                                    {buildingId === project.id ? (
-                                        <>
-                                            <Loader2 className="w-4 h-4 animate-spin" />
-                                            <span>Building...</span>
-                                        </>
-                                    ) : !project.hasPackageJson ? (
-                                        <>
-                                            <AlertTriangle className="w-4 h-4" />
-                                            <span>Invalid</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Hammer className="w-4 h-4" />
-                                            <span>Build App</span>
-                                        </>
-                                    )}
-                                </button>
-                            )}
+                            <button
+                              onClick={() => handleBuild(project.id)}
+                              disabled={buildingId === project.id || !project.hasPackageJson}
+                              className={`flex-1 flex items-center justify-center space-x-2 py-2.5 rounded-lg font-medium transition-colors border
+                                ${buildingId === project.id 
+                                  ? 'bg-gray-800 border-gray-700 text-gray-400 cursor-not-allowed' 
+                                  : !project.hasPackageJson
+                                    ? 'bg-red-900/10 border-red-900/30 text-red-400 cursor-not-allowed'
+                                    : 'bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-200'
+                                }`}
+                            >
+                              {buildingId === project.id ? (
+                                <>
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  <span>Building...</span>
+                                </>
+                              ) : !project.hasPackageJson ? (
+                                <>
+                                  <AlertTriangle className="w-4 h-4" />
+                                  <span>Invalid</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Hammer className="w-4 h-4" />
+                                  <span>Build App</span>
+                                </>
+                              )}
+                            </button>
+                          )}
                             
                             {project.hasDist && (
-                                <a 
-                                    href={project.path}
-                                    target="_blank"
-                                    className="p-2.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors border border-transparent hover:border-gray-700"
-                                    title="Open in new tab"
-                                >
-                                    <ExternalLink className="w-5 h-5" />
-                                </a>
+                              <a
+                                href={project.path?.startsWith('/') ? project.path.slice(1) : project.path}
+                                target="_blank"
+                                className="p-2.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors border border-transparent hover:border-gray-700"
+                                title="Open in new tab"
+                              >
+                                <ExternalLink className="w-5 h-5" />
+                              </a>
                             )}
                         </div>
                     </div>
