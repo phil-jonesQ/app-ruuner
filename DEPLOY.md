@@ -39,6 +39,16 @@ docker push phil73/pj-images-utils-app-runner:0.0.3
 docker push phil73/pj-images-utils-app-runner:latest
 ```
 
+You can also use the helper script we added at `scripts/build_and_push.sh` to build + push in one step.
+
+```bash
+# build and push the default image
+./scripts/build_and_push.sh
+
+# or pass a custom tag
+./scripts/build_and_push.sh myusername/my-image:0.0.1
+```
+
 3) Deploy with docker-compose (recommended for multi-container stacks)
 
 Option A — quick one-liner restart (uses remote image):
