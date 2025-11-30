@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Terminal, Play, Loader2, RefreshCw, AlertTriangle, Hammer, ExternalLink } from 'lucide-react';
 import { Project } from './types';
 
@@ -7,14 +7,23 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [buildingId, setBuildingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [online, setOnline] = useState<number>(0);
+  const [version, setVersion] = useState<string>('1.0.1');
+  const [stats, setStats] = useState<any>({ launches: {}, ratings: {} });
+  const [hoverRating, setHoverRating] = useState<Record<string, number>>({});
+  const [ratingSubmitting, setRatingSubmitting] = useState<Record<string, boolean>>({});
+  const [ratingThanks, setRatingThanks] = useState<Record<string, boolean>>({});
+  const socketRef = useRef<any>(null);
 
   const fetchProjects = async () => {
     try {
       setLoading(true);
-      const res = await fetch('api/projects');
+      const res = await apiFetch('api/projects');
       if (!res.ok) throw new Error('Failed to fetch projects');
       const data = await res.json();
       setProjects(data);
+      // also fetch stats
+      await fetchStats();
     } catch (err) {
       setError('Could not load project list. Ensure the backend is running.');
     } finally {
@@ -22,14 +31,131 @@ const App = () => {
     }
   };
 
+  const fetchStats = async () => {
+    try {
+      const r = await apiFetch('/api/stats');
+      if (!r.ok) return;
+      const j = await r.json();
+      setStats(j);
+      setOnline(j.online || 0);
+      setVersion(j.version || '1.0.1');
+    } catch (e) {}
+  };
+
+  // Helper: smart fetch that tries both base-relative (document.baseURI) and root paths
+  async function apiFetch(endpoint: string, opts?: RequestInit) {
+    // normalize endpoint
+    const ep = endpoint.replace(/^[\/]+/, '');
+
+    // candidate 1: relative to page's base (works when app is mounted at /games/)
+    let candidates: string[] = [];
+    try {
+      if (typeof document !== 'undefined' && document.baseURI) {
+        candidates.push(new URL(ep, document.baseURI).toString());
+      }
+    } catch (e) {}
+
+    // candidate 2: absolute to origin root (/api/...)
+    try {
+      candidates.push(new URL('/' + ep, window.location.origin).toString());
+    } catch (e) {}
+
+    // Try sequential candidates until we get a successful response
+    for (const url of candidates) {
+      try {
+        console.debug('[apiFetch] trying', url);
+        const resp = await fetch(url, opts);
+        // Accept 2xx/3xx as success. If 4xx/5xx, try next candidate.
+        if (resp && (resp.ok || (resp.status >= 200 && resp.status < 400))) return resp;
+      } catch (e: any) {
+        console.debug('[apiFetch] failed', url, e?.message || e);
+        // network error -> try next candidate
+      }
+    }
+
+    // Fallback: try fetch with endpoint as-is
+    return fetch(endpoint, opts);
+  }
+
   useEffect(() => {
     fetchProjects();
+
+    // setup socket connection for real-time updates
+    try {
+      // dynamic import to keep the code tree-shake friendly
+      (async () => {
+        const mod = await import('socket.io-client');
+
+        // build candidate paths for socket.io
+        const ep = 'socket.io/';
+        const candidates: string[] = [];
+        try { if (typeof document !== 'undefined' && document.baseURI) candidates.push(new URL(ep, document.baseURI).pathname); } catch(e) {}
+        candidates.push('/socket.io');
+
+        let s = null as any;
+
+        // try connecting to each candidate path (first successful wins).
+        // Try both relative path and absolute origin+path as some proxies behave differently.
+        for (const candidatePath of candidates) {
+          console.debug('[socket] trying candidate path:', candidatePath);
+          try {
+            // attempt as path-only (connect to current origin)
+            s = mod.io({ path: candidatePath });
+            // wait briefly to detect connection
+            const connected = await new Promise(resolve => {
+              let done = false;
+              const to = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 700);
+              s.on('connect', () => { if (!done) { done = true; clearTimeout(to); resolve(true); } });
+              s.on('connect_error', () => { if (!done) { done = true; clearTimeout(to); resolve(false); } });
+            });
+            if (connected) break; // s is connected
+            // otherwise disconnect and try next
+            try { s.close(); } catch(e) {}
+          } catch (e) {
+            // if direct path didn't work — try absolute origin URL
+            try {
+              const origin = window.location.origin;
+              const url = origin + (candidatePath.startsWith('/') ? candidatePath : '/' + candidatePath);
+              console.debug('[socket] trying absolute URL', url);
+              s = mod.io(url, { path: candidatePath });
+              const connected2 = await new Promise(resolve => {
+                let done = false;
+                const to = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 700);
+                s.on('connect', () => { if (!done) { done = true; clearTimeout(to); resolve(true); } });
+                s.on('connect_error', () => { if (!done) { done = true; clearTimeout(to); resolve(false); } });
+              });
+              if (connected2) break;
+              try { s.close(); } catch(e) {}
+            } catch (err2) {
+              // try next candidate
+            }
+          }
+        }
+          socketRef.current = s;
+
+          if (!s) return;
+
+          s.on('session:update', (payload: any) => {
+        setOnline(payload?.online ?? 0);
+      });
+
+        s.on('stats:update', ({ stats: newStats }: any) => {
+        if (newStats) {
+          setStats(newStats);
+          setVersion(newStats.version || '1.0.1');
+        }
+      });
+      })();
+
+    } catch (e) {
+      // socket may be unavailable — ignore silently
+    }
   }, []);
 
   const handleBuild = async (id: string) => {
     setBuildingId(id);
     try {
-      const res = await fetch(`api/build/${id}`, { method: 'POST' });
+      const res = await apiFetch(`api/build/${id}`, { method: 'POST' });
       const data = await res.json();
       
       if (!res.ok) {
@@ -43,6 +169,33 @@ const App = () => {
     } finally {
       setBuildingId(null);
     }
+  };
+
+  const handleLaunch = async (id: string, path: string) => {
+    try {
+      // record launch server-side
+      await apiFetch(`/api/launch/${encodeURIComponent(id)}`, { method: 'POST' });
+      // open app in new tab - preserve existing behavior used by anchor
+      const href = path?.startsWith('/') ? path.slice(1) : path;
+      window.open(href, '_blank');
+      // refresh stats
+      await fetchStats();
+    } catch (e) {
+      console.warn('Failed to record launch', e);
+    }
+  };
+
+  const handleRating = async (id: string, value: number) => {
+    setRatingSubmitting(s => ({ ...s, [id]: true }));
+    try {
+      await apiFetch(`/api/rate/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rating: value })});
+      await fetchStats();
+      setRatingThanks(s => ({ ...s, [id]: true }));
+      setTimeout(() => setRatingThanks(s => ({ ...s, [id]: false })), 1300);
+    } catch (e) {
+      console.warn('Failed to submit rating', e);
+    }
+    setRatingSubmitting(s => ({ ...s, [id]: false }));
   };
 
   return (
@@ -87,6 +240,14 @@ const App = () => {
                 </div>
             )}
 
+            <div className="flex items-center justify-between gap-4 mb-6">
+              <div className="flex items-center space-x-3 text-sm text-gray-300">
+                <div className="bg-gray-800 px-3 py-2 rounded-lg border border-gray-700">Version <strong className="ml-2">{version}</strong></div>
+                <div className="bg-gray-800 px-3 py-2 rounded-lg border border-gray-700">Online <strong className="ml-2">{online}</strong></div>
+              </div>
+              <div className="text-xs text-gray-400">Statistics are live and persisted on the server.</div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                 {projects.map((project) => (
                     <div 
@@ -120,15 +281,13 @@ const App = () => {
                         {/* Card Actions */}
                         <div className="p-4 bg-gray-950/50 border-t border-gray-800 flex items-center justify-between gap-3">
                             {project.hasDist ? (
-                              <a
-                                href={project.path?.startsWith('/') ? project.path.slice(1) : project.path}
-                                target="_blank"
-                                rel="noopener noreferrer"
+                              <button
+                                onClick={() => handleLaunch(project.id, project.path)}
                                 className="flex-1 flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg font-medium transition-colors"
                               >
                                 <Play className="w-4 h-4 fill-current" />
                                 <span>Launch</span>
-                              </a>
+                              </button>
                             ) : (
                             <button
                               onClick={() => handleBuild(project.id)}
@@ -170,7 +329,34 @@ const App = () => {
                                 <ExternalLink className="w-5 h-5" />
                               </a>
                             )}
+                            {/* small stats area */}
+                            <div className="ml-3 text-xs text-gray-400 text-right">
+                              <div>Launched: <strong className="text-gray-200">{stats?.launches?.[project.id] ?? 0}</strong></div>
+                              <div className="mt-1">Rating: <strong className="text-gray-200">{(stats?.ratings?.[project.id]?.average ?? 0).toFixed(1)}</strong> <span className="text-gray-500">({stats?.ratings?.[project.id]?.count ?? 0})</span></div>
+                            </div>
                         </div>
+                          {/* rating control */}
+                          <div className="px-4 pb-4 pt-2 flex items-center gap-2">
+                            <div className="text-xs text-gray-400 flex items-center gap-1">Rate this app:</div>
+                            {[1,2,3,4,5].map((val) => {
+                              const avg = stats?.ratings?.[project.id]?.average ?? 0;
+                              const active = val <= Math.round(hoverRating[project.id] ?? avg);
+                              return (
+                                <button key={val}
+                                  onMouseEnter={() => setHoverRating(s => ({ ...s, [project.id]: val }))}
+                                  onMouseLeave={() => setHoverRating(s => ({ ...s, [project.id]: 0 }))}
+                                  onClick={() => handleRating(project.id, val)}
+                                  className="p-1 rounded hover:bg-gray-700/40 focus:outline-none"
+                                  disabled={ratingSubmitting[project.id]}
+                                  title={`Rate ${val}`}>
+                                  <span className={`text-sm ${active ? 'text-amber-400 scale-110' : 'text-gray-600'} transition-all duration-150 inline-block`}>★</span>
+                                </button>
+                              );
+                            })}
+                            {ratingThanks[project.id] && (
+                              <div className="text-xs text-green-300 ml-2">Thanks!</div>
+                            )}
+                          </div>
                     </div>
                 ))}
             </div>

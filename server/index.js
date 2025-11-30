@@ -8,6 +8,10 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import http from 'http';
+import { Server as SocketIO } from 'socket.io';
+import Database from 'better-sqlite3';
+
 const app = express();
 const PORT = process.env.PORT || 2001;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data_mock'); // Fallback for local dev
@@ -83,7 +87,82 @@ app.use((req, res, next) => {
 
 app.use(express.static(DIST_DIR));
 
+// --- SQLite persistence (server/state.db)
+const DB_FILE = path.join(__dirname, 'state.db');
+let db;
+try {
+  db = new Database(DB_FILE);
+} catch (e) {
+  console.error('Failed to open SQLite DB', e.message);
+  process.exit(1);
+}
+
+// Initialize schema
+db.exec(`
+CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS launches (project_id TEXT PRIMARY KEY, count INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, rating INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, meta TEXT, connected_at TEXT DEFAULT CURRENT_TIMESTAMP, disconnected_at TEXT DEFAULT NULL);
+`);
+
+// If existing state.json exists, migrate to sqlite (one-time)
+try {
+  const sfile = path.join(__dirname, 'state.json');
+  if (fs.existsSync(sfile)) {
+    try {
+      const raw = fs.readFileSync(sfile, 'utf8');
+      const parsed = JSON.parse(raw);
+
+      const insertKV = db.prepare('INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)');
+      if (parsed.version) insertKV.run('version', parsed.version);
+
+      const insertLaunch = db.prepare('INSERT OR REPLACE INTO launches (project_id, count) VALUES (?,?)');
+      for (const [k,v] of Object.entries(parsed.launches || {})) insertLaunch.run(k, Number(v || 0));
+
+      const insertRating = db.prepare('INSERT INTO ratings (project_id,rating) VALUES (?,?)');
+      for (const [k, arr] of Object.entries(parsed.ratings || {})) {
+        if (Array.isArray(arr)) for (const r of arr) insertRating.run(k, Number(r));
+      }
+
+      // remove old state.json to avoid re-migration
+      try { fs.unlinkSync(sfile); } catch (e) {}
+    } catch (e) {
+      console.warn('Failed to migrate state.json', e.message);
+    }
+  }
+} catch (e) {}
+
+// helper getters
+const getVersionKV = db.prepare('SELECT v FROM kv WHERE k = ?');
+const setVersionKV = db.prepare('INSERT OR REPLACE INTO kv (k,v) VALUES (?,?)');
+const getLaunch = db.prepare('SELECT count FROM launches WHERE project_id = ?');
+const incLaunch = db.prepare('INSERT INTO launches(project_id,count) VALUES(?,1) ON CONFLICT(project_id) DO UPDATE SET count = count + 1');
+const setLaunch = db.prepare('INSERT OR REPLACE INTO launches (project_id, count) VALUES (?,?)');
+const getAllLaunches = db.prepare('SELECT project_id, count FROM launches');
+const insertRating = db.prepare('INSERT INTO ratings (project_id, rating) VALUES (?,?)');
+const getRatingSummary = db.prepare('SELECT project_id, COUNT(*) as count, AVG(rating) as average FROM ratings GROUP BY project_id');
+const createSession = db.prepare('INSERT OR REPLACE INTO sessions (id, meta, connected_at, disconnected_at) VALUES (?, ?, CURRENT_TIMESTAMP, NULL)');
+const disconnectSession = db.prepare('UPDATE sessions SET disconnected_at = CURRENT_TIMESTAMP WHERE id = ?');
+const countOnlineSessions = db.prepare("SELECT COUNT(*) as c FROM sessions WHERE disconnected_at IS NULL");
+
+// Runtime-only track of connected clients (sessions)
+let runtimeOnline = 0;
+
 // --- API ROUTES ---
+
+// Support requests that arrive under a proxy-mounted prefix like /games/*
+// If the incoming path contains '/api/' but isn't mounted at root, rewrite req.url
+// so our handlers (which are registered at /api/*) still match.
+app.use((req, res, next) => {
+  try {
+    const idx = req.path.indexOf('/api/');
+    if (idx > 0) {
+      // rewrite URL so next handlers see '/api/...'
+      req.url = req.url.substring(idx);
+    }
+  } catch(e) {}
+  next();
+});
 
 // 1. List all projects in the data directory
 app.get('/api/projects', (req, res) => {
@@ -127,6 +206,87 @@ app.get('/api/projects', (req, res) => {
   } catch (error) {
     console.error("Error reading projects:", error);
     res.status(500).json({ error: "Failed to scan projects" });
+  }
+});
+
+// --- Stats + persistence endpoints ---
+app.get('/api/stats', (req, res) => {
+  try {
+    const versionRow = getVersionKV.get('version');
+    const version = versionRow ? versionRow.v : '1.0.1';
+
+    // launches
+    const launches = {};
+    for (const row of getAllLaunches.all()) launches[row.project_id] = Number(row.count || 0);
+
+    // ratings summary
+    const ratings = {};
+    for (const row of getRatingSummary.all()) {
+      ratings[row.project_id] = { average: Number(row.average || 0), count: Number(row.count || 0) };
+    }
+
+    // sessions online (use DB authoritative count)
+    const c = countOnlineSessions.get();
+    const online = c ? Number(c.c || 0) : 0;
+
+    return res.json({ version, online, launches, ratings });
+  } catch (e) {
+    console.error('Failed to build stats response', e.message);
+    res.status(500).json({ error: 'Failed to build stats' });
+  }
+});
+
+// Debug: list recent sessions (connected/disconnected)
+app.get('/api/sessions', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT id, meta, connected_at, disconnected_at FROM sessions ORDER BY connected_at DESC LIMIT 200').all();
+    return res.json(rows.map(r => ({ id: r.id, meta: r.meta ? JSON.parse(r.meta) : null, connected_at: r.connected_at, disconnected_at: r.disconnected_at })));
+  } catch (e) {
+    console.warn('Failed to read sessions', e.message);
+    res.status(500).json({ error: 'Failed to read sessions' });
+  }
+});
+
+// increment a project's launch counter
+app.post('/api/launch/:id', (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+    incLaunch.run(id);
+    const newValRow = getLaunch.get(id);
+    const launches = newValRow ? Number(newValRow.count || 0) : 0;
+
+    // notify connected clients
+    try { app.emit('stats-changed', { type: 'launch', id, launches }); } catch (e) {}
+
+    return res.json({ success: true, launches });
+  } catch (e) {
+    console.error('Failed to record launch', e.message);
+    res.status(500).json({ error: 'Failed to record launch' });
+  }
+});
+
+// record a rating (expected body: { rating: number })
+app.post('/api/rate/:id', (req, res) => {
+  try {
+    const id = req.params.id;
+    const rating = Number(req.body?.rating);
+    if (!id || Number.isNaN(rating) || rating < 0 || rating > 5) return res.status(400).json({ error: 'Invalid payload' });
+
+    insertRating.run(id, rating);
+
+    // compute count for this project
+    const summary = db.prepare('SELECT COUNT(*) as c FROM ratings WHERE project_id = ?').get(id);
+    const count = summary ? Number(summary.c || 0) : 0;
+
+    // emit
+    try { app.emit('stats-changed', { type: 'rating', id, rating }); } catch (e) {}
+
+    return res.json({ success: true, ratingCount: count });
+  } catch (e) {
+    console.error('Failed to record rating', e.message);
+    res.status(500).json({ error: 'Failed to rate' });
   }
 });
 
@@ -355,7 +515,112 @@ app.get('*', (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// create an http server and attach socket.io so we can track sessions
+const server = http.createServer(app);
+
+// If the app is mounted behind a proxy (for example /games/), websocket
+// upgrade requests may come in with paths like '/games/socket.io/...'.
+// Rewrite those upgrade request URLs so engine/socket.io sees the expected
+// '/socket.io' path and can accept the connection.
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const u = req.url || '';
+    const idx = u.indexOf('/socket.io');
+    if (idx > 0) {
+      // rewrite to start at /socket.io
+      req.url = u.substring(idx);
+    }
+  } catch (e) {}
+});
+
+// Also rewrite plain HTTP requests for socket.io polling when the proxy keeps
+// a mount prefix (e.g. '/games/socket.io/...') so engine.io's handlers see the
+// expected '/socket.io' path.
+server.on('request', (req, res) => {
+  try {
+    const u = req.url || '';
+    const idx = u.indexOf('/socket.io');
+    if (idx > 0) {
+      req.url = u.substring(idx);
+    }
+  } catch (e) {}
+});
+
+const io = new SocketIO(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
+});
+
+io.on('connection', (socket) => {
+  // persist session to DB on connect
+  try {
+    createSession.run(socket.id, null);
+  } catch (e) {}
+
+  // compute current online count from DB and broadcast
+  try {
+    const c = countOnlineSessions.get();
+    runtimeOnline = c ? Number(c.c || 0) : io.sockets.sockets.size;
+    io.emit('session:update', { online: runtimeOnline });
+  } catch (e) {
+    runtimeOnline = io.sockets.sockets.size;
+    io.emit('session:update', { online: runtimeOnline });
+  }
+
+  // send the current persisted stats to the newly connected socket
+  try {
+    const versionRow = getVersionKV.get('version');
+    const version = versionRow ? versionRow.v : '1.0.1';
+
+    const launches = {};
+    for (const row of getAllLaunches.all()) launches[row.project_id] = Number(row.count || 0);
+
+    const ratings = Object.fromEntries(getRatingSummary.all().map(r => [r.project_id, { average: Number(r.average || 0), count: Number(r.count || 0) }]));
+
+    socket.emit('stats:update', { stats: { version, online: runtimeOnline, launches, ratings } });
+  } catch (e) {
+    // ignore
+  }
+
+  // optional: client may send a join event (we persist meta)
+  socket.on('session:join', (meta) => {
+    try { createSession.run(socket.id, JSON.stringify(meta || null)); } catch (e) {}
+    io.emit('session:joined', { id: socket.id, meta, online: io.sockets.sockets.size });
+  });
+
+  socket.on('disconnect', () => {
+    try { disconnectSession.run(socket.id); } catch (e) {}
+    try {
+      const c = countOnlineSessions.get();
+      runtimeOnline = c ? Number(c.c || 0) : io.sockets.sockets.size;
+      io.emit('session:update', { online: runtimeOnline });
+    } catch (e) {
+      runtimeOnline = io.sockets.sockets.size;
+      io.emit('session:update', { online: runtimeOnline });
+    }
+  });
+});
+
+// When our API updates persisted stats, forward those changes via socket so UIs stay in sync
+app.on('stats-changed', (payload) => {
+  try {
+    const versionRow = getVersionKV.get('version');
+    const version = versionRow ? versionRow.v : '1.0.1';
+
+    const launches = {};
+    for (const row of getAllLaunches.all()) launches[row.project_id] = Number(row.count || 0);
+
+    const ratings = Object.fromEntries(getRatingSummary.all().map(r => [r.project_id, { average: Number(r.average || 0), count: Number(r.count || 0) }]));
+
+    io.emit('stats:update', { payload, stats: { version, online: runtimeOnline, launches, ratings } });
+  } catch (e) {
+    console.warn('Failed to emit stats-changed', e.message);
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Runner Service listening at http://0.0.0.0:${PORT}`);
   console.log(`Scanning for games in: ${DATA_DIR}`);
 });

@@ -160,4 +160,37 @@ If you want the **one-line, ready-to-run** snippet to update with compose now (r
 docker compose pull app-runner && docker compose up -d --no-deps --force-recreate app-runner && docker logs --follow app-runner
 ```
 
+---
+
+Additional API / realtime features (new)
+--------------------------------------
+
+This release adds a very small server-side persistence layer (server/state.json), a few new APIs and realtime updates via socket.io so the UI can show live user counts and app statistics.
+
+- GET /api/stats — returns a JSON payload with version (server-side) plus launches and rating summaries and the current online user count.
+- POST /api/launch/:id — increments the launch counter for a project ID (used when a user clicks Launch).
+- POST /api/rate/:id — submit a rating payload (JSON: { rating: <0..5> }) — ratings are persisted and averaged on /api/stats responses.
+
+Realtime note: the server emits socket.io events on connect and when stats are updated. Connect a client to the same origin and subscribe to `session:update` and `stats:update` messages.
+
+Server state is stored in `server/state.db` (SQLite). On first start the server migrates any existing `server/state.json` into `state.db` then removes the JSON file. Sessions are persisted and can be inspected via `/api/sessions`.
+
+Proxy-mounted deployments (important)
+----------------------------------
+
+If you mount the application under a path (e.g. https://example.com/games/) behind a reverse proxy, a few points are required so the UI can talk to the server:
+
+- The proxy should either strip the mount prefix when forwarding requests to the upstream (recommended), or you must ensure the proxy forwards requests to both `/games/api/*` and `/games/socket.io/*` to the upstream unchanged.
+- Ensure the proxy supports and forwards WebSocket upgrades for `/socket.io` (or `<prefix>/socket.io`) so the live Online and stats updates work.
+- If you want persistent stats across container upgrades, mount a host volume for the server state file (example):
+
+```yaml
+services:
+  app-runner:
+    volumes:
+      - /some/host/path/app-runner-data:/app/server
+```
+
+This will keep `server/state.db` on the host and preserve the launches/ratings/sessions between container updates.
+
 End of guide.

@@ -8,11 +8,16 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
+      "smoke-test": "node scripts/smoke_stats.js",
+      "integration-test": "node scripts/integration_test.js",
     "start": "node server/index.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "socket.io": "^4.7.0",
+    "socket.io-client": "^4.7.0",
+    "better-sqlite3": "^8.4.0",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
