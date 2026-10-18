@@ -24,6 +24,8 @@ Server (backend) support
 
 The repository now includes a small server (Express + socket.io) which powers the runner UI and a tiny persistent stats store. To run it locally:
 
+The optional SportAPI proxy requires `SPORTAPI_API_KEY` in the app-runner server's environment. Keep this key on the server; do not add it to the teletext app's Vite environment or client bundle. For Docker Compose, set the variable in the deployment environment before starting or recreating the runner container. The proxy endpoint is `/api/sportapi/fixtures/date/:date`, only serves the current London calendar date, and caches responses for 60 seconds to limit provider usage. Rebuild and redeploy the app-runner itself to install this proxy; uploading a game ZIP alone does not update its server.
+
 ```bash
 # install dependencies (root)
 npm install

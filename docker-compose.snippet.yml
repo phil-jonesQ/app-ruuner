@@ -10,6 +10,7 @@
         environment:
             - PORT=2001
             - DATA_DIR=/data
+            - SPORTAPI_API_KEY=${SPORTAPI_API_KEY:-}
         networks:
             pj-images-vlan-200:
                 ipv4_address: 192.168.200.8 # Next available IP based on your list

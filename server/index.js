@@ -15,6 +15,23 @@ import Database from 'better-sqlite3';
 const app = express();
 const PORT = process.env.PORT || 2001;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data_mock'); // Fallback for local dev
+const SPORTAPI_BASE_URL = 'https://sportapi.ai/api';
+const SPORTAPI_CACHE_TTL_MS = 60_000;
+let sportApiFixturesCache = null;
+let sportApiFixturesCacheDate = '';
+let sportApiFixturesCacheTime = 0;
+let sportApiFixturesRequest = null;
+
+const getLondonDateKey = () => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/London',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const dateParts = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+};
 
 // Ensure data dir exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -162,6 +179,76 @@ app.use((req, res, next) => {
     }
   } catch(e) {}
   next();
+});
+
+app.get('/api/sportapi/fixtures/date/:date', async (req, res) => {
+  const { date } = req.params;
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    Number.isNaN(parsedDate.getTime()) ||
+    parsedDate.toISOString().slice(0, 10) !== date
+  ) {
+    return res.status(400).json({ error: 'Date must use YYYY-MM-DD format' });
+  }
+  if (date !== getLondonDateKey()) {
+    return res.status(400).json({ error: "Only today's fixtures are available" });
+  }
+
+  const apiKey = process.env.SPORTAPI_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ error: 'SportAPI is not configured on the server' });
+  }
+
+  if (
+    sportApiFixturesCacheDate === date &&
+    Date.now() - sportApiFixturesCacheTime < SPORTAPI_CACHE_TTL_MS
+  ) {
+    return res.json(sportApiFixturesCache);
+  }
+
+  try {
+    let request = sportApiFixturesRequest;
+    if (!request || request.date !== date) {
+      request = {
+        date,
+        promise: fetch(`${SPORTAPI_BASE_URL}/fixtures/date/${date}`, {
+          headers: { 'X-Api-Key': apiKey, Accept: 'application/json' },
+          signal: AbortSignal.timeout(10_000),
+        }).then(async (response) => {
+          if (!response.ok) {
+            const error = new Error(`SportAPI returned HTTP ${response.status}`);
+            error.status = response.status === 429 ? 429 : 502;
+            throw error;
+          }
+          const payload = await response.json();
+          if (payload?.success !== true || !Array.isArray(payload.data)) {
+            throw new Error('SportAPI returned an invalid fixtures response');
+          }
+          return payload;
+        }),
+      };
+      sportApiFixturesRequest = request;
+    }
+
+    const payload = await request.promise;
+    if (sportApiFixturesRequest === request) {
+      sportApiFixturesCache = payload;
+      sportApiFixturesCacheDate = date;
+      sportApiFixturesCacheTime = Date.now();
+      sportApiFixturesRequest = null;
+    }
+    return res.json(payload);
+  } catch (error) {
+    if (sportApiFixturesRequest?.date === date) {
+      sportApiFixturesRequest = null;
+    }
+    const status = error.status || 502;
+    console.error(`SportAPI fixtures request failed (${status})`);
+    return res.status(status).json({
+      error: status === 429 ? 'SportAPI daily request limit reached' : 'SportAPI fixtures request failed',
+    });
+  }
 });
 
 // 1. List all projects in the data directory
